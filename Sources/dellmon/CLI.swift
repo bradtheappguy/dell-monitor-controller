@@ -6,22 +6,35 @@ enum CLI {
 
     USAGE
       dellmon <feature> [value]          read a feature, or set it
-      dellmon get [feature ...]          read features (all four by default)
+      dellmon get [feature ...]          read the main features
       dellmon set <feature> <value>      set a feature
+      dellmon info                       everything the monitor reports
       dellmon list                       list DDC-capable displays
+      dellmon reset <what>               restore factory defaults
       dellmon caps                       print the monitor's capability string
+      dellmon probe                      read every control the monitor has
+      dellmon watch                      report controls as they change
       dellmon raw get <code>             read any VCP code
       dellmon raw set <code> <value>     write any VCP code
 
     FEATURES
-      brightness    0-100
-      contrast      0-100
-      volume        0-100
-      input         dp, hdmi1, hdmi2, usbc (or a raw code)
+      brightness         0-100
+      contrast           0-100
+      volume             0-100
+      input              dp, hdmi1, hdmi2, usbc
+      power              on, standby, off
+      preset             standard, movie, game
+      colortemp          5000k, 6500k, 7500k, 9300k, 10000k, user1, user2
+      red, green, blue   0-100, white point gain in custom colour mode
 
     VALUES
       60            absolute
       +10  -10      relative to the current value
+
+    RESET
+      dellmon reset brightness           brightness and contrast
+      dellmon reset color                colour settings
+      dellmon reset all                  every setting
 
     OPTIONS
       -d, --display <n|text>   target display: list index, or part of its
@@ -79,31 +92,36 @@ enum CLI {
 
         do {
             switch command {
-            case "list":
-                try list()
             case "help":
                 print(usage)
+            case "list":
+                try list()
             case "caps":
-                let display = try DisplayFinder.select(displaySelector)
-                print(try display.ddc(verbose: verbose).capabilities())
+                print(try display(displaySelector).ddc(verbose: verbose).capabilities())
+            case "info":
+                try info(display: display(displaySelector), verbose: verbose)
+            case "probe":
+                try probe(display: display(displaySelector), verbose: verbose)
+            case "watch":
+                try watch(display: display(displaySelector), verbose: verbose)
+            case "reset":
+                try reset(rest, display: display(displaySelector), quiet: quiet, verbose: verbose)
             case "raw":
-                try raw(rest, displaySelector: displaySelector, quiet: quiet, verbose: verbose)
+                try raw(rest, display: display(displaySelector), quiet: quiet, verbose: verbose)
             case "get":
-                let display = try DisplayFinder.select(displaySelector)
-                try get(rest, display: display, quiet: quiet, verbose: verbose)
+                try get(rest, display: display(displaySelector), quiet: quiet, verbose: verbose)
             case "set":
                 guard rest.count == 2 else { fail("usage: dellmon set <feature> <value>") }
-                let display = try DisplayFinder.select(displaySelector)
-                try set(rest[0], to: rest[1], display: display, quiet: quiet, verbose: verbose)
+                try set(rest[0], to: rest[1], display: display(displaySelector), quiet: quiet, verbose: verbose)
             default:
                 guard Features.named(command) != nil else {
                     fail("unknown command or feature '\(command)' — try `dellmon --help`")
                 }
-                let display = try DisplayFinder.select(displaySelector)
+                let target = try display(displaySelector)
                 if let value = rest.first {
-                    try set(command, to: value, display: display, quiet: quiet, verbose: verbose)
+                    try set(command, to: value, display: target, quiet: quiet, verbose: verbose)
                 } else {
-                    try get([command], display: display, quiet: quiet, verbose: verbose)
+                    try get([command], display: target, quiet: quiet, verbose: verbose)
                 }
             }
         } catch let error as DDCError {
@@ -115,6 +133,10 @@ enum CLI {
 
     // MARK: - Commands
 
+    private static func display(_ selector: String?) throws -> Display {
+        try DisplayFinder.select(selector)
+    }
+
     private static func list() throws {
         for display in try DisplayFinder.all() {
             let maker = display.manufacturer.isEmpty ? "" : "  \(display.manufacturer)"
@@ -125,7 +147,7 @@ enum CLI {
 
     private static func get(_ names: [String], display: Display, quiet: Bool, verbose: Bool) throws {
         let readingEverything = names.isEmpty
-        let features = (readingEverything ? Features.all.map(\.name) : names).map { name -> Feature in
+        let features = (readingEverything ? Features.core.map(\.name) : names).map { name -> Feature in
             guard let feature = Features.named(name) else {
                 fail("unknown feature '\(name)' — try `dellmon --help`")
             }
@@ -136,11 +158,7 @@ enum CLI {
         for feature in features {
             do {
                 let (current, _) = try ddc.getVCP(feature.code)
-                if quiet {
-                    print(feature.describe(current))
-                } else {
-                    print("\(feature.name.padding(toLength: 11, withPad: " ", startingAt: 0))\(feature.describe(current))")
-                }
+                print(quiet ? feature.describe(current) : row(feature.name, feature.describe(current)))
             } catch let error as DDCError {
                 guard readingEverything else { throw error }
                 // A feature this monitor happens not to implement shouldn't
@@ -189,16 +207,117 @@ enum CLI {
         }
 
         try ddc.setVCP(feature.code, value)
+
         guard !quiet else { return }
         if let previous, previous != value {
             print("\(feature.name) \(feature.describe(previous)) -> \(feature.describe(value))")
         } else {
             print("\(feature.name) \(feature.describe(value))")
         }
+        if feature.code == Features.power.code, value != 0x01 {
+            warn("the monitor may stop answering DDC while off — its power button always wakes it")
+        }
     }
 
-    private static func raw(_ args: [String], displaySelector: String?, quiet: Bool, verbose: Bool) throws {
-        let display = try DisplayFinder.select(displaySelector)
+    private static func info(display: Display, verbose: Bool) throws {
+        let ddc = display.ddc(verbose: verbose)
+        print(row("model", display.name))
+        if !display.manufacturer.isEmpty { print(row("vendor", display.manufacturer)) }
+        if !display.serial.isEmpty { print(row("serial", display.serial)) }
+
+        if let version = try? ddc.getVCP(0xDF).current {
+            print(row("mccs", "\(version >> 8).\(version & 0xFF)"))
+        }
+        if let firmware = try? ddc.getVCP(0xC9).current {
+            print(row("firmware", "0x\(String(format: "%04X", firmware))"))
+        }
+        if let refresh = try? ddc.getVCP(0xAE).current {
+            print(row("refresh", String(format: "%.2f Hz", Double(refresh) / 100)))
+        }
+
+        for feature in Features.all {
+            guard let reading = try? ddc.getVCP(feature.code) else { continue }
+            print(row(feature.name, feature.describe(reading.current)))
+        }
+    }
+
+    private static func probe(display: Display, verbose: Bool) throws {
+        let ddc = display.ddc(verbose: verbose)
+        let capabilities = Capabilities.parse(try ddc.capabilities())
+        guard !capabilities.controls.isEmpty else { fail("the monitor advertised no controls") }
+
+        print("code  control      value          advertised")
+        for control in capabilities.controls {
+            let feature = Features.named(code: control.code)
+            let reading = try? ddc.getVCP(control.code)
+
+            let value: String
+            if let reading {
+                value = feature.map { $0.describe(reading.current) }
+                    ?? "\(reading.current) / \(reading.max)"
+            } else {
+                value = "-"
+            }
+            let advertised = control.values
+                .map { feature?.describe($0) ?? "0x\(String(format: "%02X", $0))" }
+                .joined(separator: " ")
+
+            print("0x\(hex(control.code))  \(pad(feature?.name ?? "-", 11))  \(pad(value, 13))  \(advertised)")
+        }
+        print("")
+        print("controls shown as - have no name in this tool; `dellmon watch` identifies them")
+    }
+
+    /// Polls every advertised control and reports changes, so that a control
+    /// this tool has no name for can be identified by changing it in the
+    /// monitor's own menu and seeing which code moves.
+    private static func watch(display: Display, verbose: Bool) throws {
+        let ddc = display.ddc(verbose: verbose)
+        let capabilities = Capabilities.parse(try ddc.capabilities())
+        // 0x02 and 0x52 report *that* something changed, so they move
+        // whenever anything else does and would drown out the control itself.
+        let noisy: Set<UInt8> = [0x02, 0x52]
+        let codes = capabilities.controls.map(\.code).filter { !noisy.contains($0) }
+        guard !codes.isEmpty else { fail("the monitor advertised no controls") }
+
+        var known = [UInt8: UInt16]()
+        for code in codes {
+            if let reading = try? ddc.getVCP(code) { known[code] = reading.current }
+        }
+        warn("watching \(known.count) controls — change something in the monitor's menu (ctrl-c to stop)")
+
+        while true {
+            for code in codes {
+                guard let reading = try? ddc.getVCP(code) else { continue }
+                defer { known[code] = reading.current }
+                guard let previous = known[code], previous != reading.current else { continue }
+
+                let feature = Features.named(code: code)
+                let describe = { (value: UInt16) in feature?.describe(value) ?? String(value) }
+                print("0x\(hex(code))  \(pad(feature?.name ?? "-", 11))  \(describe(previous)) -> \(describe(reading.current))")
+                fflush(stdout)
+            }
+        }
+    }
+
+    private static func reset(_ args: [String], display: Display, quiet: Bool, verbose: Bool) throws {
+        let code: UInt8
+        switch args.first {
+        case "brightness", "contrast":
+            code = 0x05
+        case "color", "colour":
+            code = 0x08
+        case "all", "factory":
+            code = 0x04
+        default:
+            fail("usage: dellmon reset brightness|color|all")
+        }
+        // These are write-only actions: the value is the trigger, not a setting.
+        try display.ddc(verbose: verbose).setVCP(code, 1)
+        if !quiet { print("reset \(args[0])") }
+    }
+
+    private static func raw(_ args: [String], display: Display, quiet: Bool, verbose: Bool) throws {
         let ddc = display.ddc(verbose: verbose)
 
         switch args.first {
@@ -226,6 +345,14 @@ enum CLI {
         let lowered = text.lowercased()
         if lowered.hasPrefix("0x") { return Int(lowered.dropFirst(2), radix: 16) }
         return Int(text)
+    }
+
+    private static func pad(_ text: String, _ width: Int) -> String {
+        text.count >= width ? text : text.padding(toLength: width, withPad: " ", startingAt: 0)
+    }
+
+    private static func row(_ label: String, _ value: String) -> String {
+        "\(pad(label, 11))\(value)"
     }
 
     static func warn(_ message: String) {

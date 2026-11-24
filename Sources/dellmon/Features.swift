@@ -48,6 +48,10 @@ struct Feature {
 }
 
 enum Features {
+    static let brightness = Feature(name: "brightness", code: 0x10, choices: [])
+    static let contrast = Feature(name: "contrast", code: 0x12, choices: [])
+    static let volume = Feature(name: "volume", code: 0x62, choices: [])
+
     /// The four inputs a U3818DW reports in its capability string,
     /// `60(1B 0F 11 12)`. On another monitor, `dellmon caps` is the authority
     /// and `dellmon raw set 0x60 <code>` reaches anything not listed here.
@@ -58,14 +62,49 @@ enum Features {
         .init("usbc", 0x1B, "usb-c", "typec", "type-c", "thunderbolt"),
     ])
 
-    static let all: [Feature] = [
-        Feature(name: "brightness", code: 0x10, choices: []),
-        Feature(name: "contrast", code: 0x12, choices: []),
-        Feature(name: "volume", code: 0x62, choices: []),
-        input,
-    ]
+    /// `D6(01 04 05)`. A monitor switched off this way may stop answering
+    /// DDC, so waking it can need its power button rather than `power on`.
+    static let power = Feature(name: "power", code: 0xD6, choices: [
+        .init("on", 0x01),
+        .init("standby", 0x04, "sleep", "suspend"),
+        .init("off", 0x05),
+    ])
+
+    /// `DC(00 03 05)` — the monitor's picture presets.
+    static let preset = Feature(name: "preset", code: 0xDC, choices: [
+        .init("standard", 0x00),
+        .init("movie", 0x03),
+        .init("game", 0x05, "games"),
+    ])
+
+    /// `14(04 05 06 08 09 0B 0C)`, named per MCCS. Dell's OSD labels its
+    /// colour temperatures slightly differently, so treat these as the codes
+    /// the monitor accepts rather than as exact OSD wording.
+    static let colorTemperature = Feature(name: "colortemp", code: 0x14, choices: [
+        .init("5000k", 0x04),
+        .init("6500k", 0x05),
+        .init("7500k", 0x06),
+        .init("9300k", 0x08),
+        .init("10000k", 0x09),
+        .init("user1", 0x0B, "custom"),
+        .init("user2", 0x0C),
+    ])
+
+    /// White-point gains, which the monitor applies in its custom colour mode.
+    static let red = Feature(name: "red", code: 0x16, choices: [])
+    static let green = Feature(name: "green", code: 0x18, choices: [])
+    static let blue = Feature(name: "blue", code: 0x1A, choices: [])
+
+    /// What `dellmon get` reports when asked for nothing in particular.
+    static let core = [brightness, contrast, volume, input]
+
+    static let all = core + [power, preset, colorTemperature, red, green, blue]
 
     static func named(_ name: String) -> Feature? {
         all.first { $0.name == name }
+    }
+
+    static func named(code: UInt8) -> Feature? {
+        all.first { $0.code == code }
     }
 }

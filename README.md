@@ -2,8 +2,9 @@
 
 # dellmon
 
-Command line control of a Dell U3818DW over DDC/CI: switch the input, and set
-brightness, contrast and volume without touching the joystick on the back.
+Command line control of a Dell U3818DW over DDC/CI: switch the input, set
+brightness, contrast, volume, colour and power, without reaching for the
+joystick on the back.
 
 ```
 $ dellmon get
@@ -40,23 +41,34 @@ Requires macOS 12+ on Apple Silicon.
 
 ```
 dellmon <feature> [value]          read a feature, or set it
-dellmon get [feature ...]          read features (all four by default)
+dellmon get [feature ...]          read the main features
 dellmon set <feature> <value>      set a feature
+dellmon info                       everything the monitor reports
 dellmon list                       list DDC-capable displays
+dellmon reset <what>               restore factory defaults
 dellmon caps                       print the monitor's capability string
+dellmon probe                      read every control the monitor has
+dellmon watch                      report controls as they change
 dellmon raw get <code>             read any VCP code
 dellmon raw set <code> <value>     write any VCP code
 ```
 
-| Feature      | Values                                        |
-| ------------ | --------------------------------------------- |
-| `brightness` | `0`–`100`                                     |
-| `contrast`   | `0`–`100`                                     |
-| `volume`     | `0`–`100`                                     |
-| `input`      | `dp`, `hdmi1`, `hdmi2`, `usbc`, or a raw code |
+| Feature              | Values                                                 |
+| -------------------- | ------------------------------------------------------ |
+| `brightness`         | `0`–`100`                                              |
+| `contrast`           | `0`–`100`                                              |
+| `volume`             | `0`–`100`                                              |
+| `input`              | `dp`, `hdmi1`, `hdmi2`, `usbc`, or a raw code          |
+| `power`              | `on`, `standby`, `off`                                 |
+| `preset`             | `standard`, `movie`, `game`                            |
+| `colortemp`          | `5000k`, `6500k`, `7500k`, `9300k`, `10000k`, `user1`, `user2` |
+| `red`, `green`, `blue` | `0`–`100` white point gain                           |
 
 Numeric values can be absolute (`60`) or relative (`+10`, `-10`), and are
 clamped to the range the monitor reports.
+
+`dellmon reset` takes `brightness` (brightness and contrast), `color`, or
+`all`.
 
 Options: `-d/--display <n|text>` to pick a display by list index or by part of
 its name or serial, `-q/--quiet` for bare values suitable for scripting,
@@ -64,6 +76,15 @@ its name or serial, `-q/--quiet` for bare values suitable for scripting,
 
 Handy for hotkeys — bind `dellmon volume +5` or `dellmon input usbc` to a key
 in Raycast, skhd or Karabiner.
+
+Two behaviours are worth knowing before you script them:
+
+- Setting `red`, `green` or `blue` moves the monitor into its custom colour
+  mode, so `colortemp` will read back as `user2` afterwards. Set `colortemp`
+  to put it back on a named temperature.
+- `power off` and `power standby` may leave the monitor unable to answer DDC,
+  in which case `power on` cannot wake it and the power button is the way
+  back.
 
 ## How it works
 
@@ -96,10 +117,44 @@ Two quirks of this monitor are worth knowing if you extend the tool:
   capped exponential backoff, which also covers the occasional NAK on an
   otherwise idle bus. A read normally completes in about 90ms.
 
+## What else the monitor exposes
+
+`dellmon probe` reads every control the monitor advertises, naming the ones
+this tool maps:
+
+```
+code  control      value          advertised
+0x10  brightness   100
+0x14  colortemp    6500k          5000k 6500k 7500k 9300k 10000k user1 user2
+0x60  input        dp             usbc dp hdmi1 hdmi2
+0xCC  -            2 / 13         0x02 0x0A 0x03 0x04 0x08 0x09 0x0D 0x06
+0xE9  -            0 / 255        0x00 0x21 0x22 0x24
+...
+```
+
+A U3818DW advertises 37 controls. Beyond the ones named above it exposes a
+handful of standard read-only facts — MCCS version, firmware level, refresh
+rate, panel technology, all folded into `dellmon info` — plus OSD language at
+`0xCC`, and then a dozen manufacturer-private codes in the `0xE0`–`0xFD`
+range that Dell does not document. Those are where features like PIP/PBP live.
+
+To identify one, `dellmon watch` polls every control and prints the ones that
+move:
+
+```
+$ dellmon watch
+dellmon: watching 35 controls — change something in the monitor's menu (ctrl-c to stop)
+0xE9  -            0 -> 33
+```
+
+Change a setting in the monitor's own menu, see which code follows it, then
+drive it with `dellmon raw set`. Writing a private code blind is a bad idea —
+some of them lock the OSD or reassign the USB upstream port — so map it first.
+
 ## Other monitors
 
-Nothing here is specific to the U3818DW apart from the input names. Ask any
-connected monitor what it supports:
+Nothing here is specific to the U3818DW apart from the names given to input
+and preset values. Ask any connected monitor what it supports:
 
 ```
 $ dellmon caps
@@ -112,11 +167,11 @@ $ dellmon caps
 The `vcp(...)` list is every feature the monitor implements, and a code
 followed by a parenthesised list — `60(1B 0F 11 12)` — gives the discrete
 values it accepts. That is where this tool's input codes come from. Anything
-not wrapped in a friendly name is still reachable:
+without a friendly name is still reachable:
 
 ```sh
-dellmon raw set 0xD6 0x04     # power mode: standby
-dellmon raw get 0xDC          # preset colour mode
+dellmon raw get 0xCC          # OSD language
+dellmon raw set 0xE9 0x21     # a Dell-private control
 ```
 
 ## Troubleshooting
@@ -132,3 +187,7 @@ built-in laptop panel is controlled through macOS instead.
 macOS may drop the display entirely — in which case `dellmon` can no longer
 reach it and you will need the joystick on the back of the monitor to switch
 back. Check what is plugged in before switching blind.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
